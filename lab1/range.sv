@@ -87,7 +87,7 @@ module range
 
          S_READ: begin
             done <= 1'b1;
-            state <= S_READ;  // keep done high is fine; if you need pulse, see below
+            state <= S_READ; 
             if (go) begin
                n     <= start;
                num   <= '0;
