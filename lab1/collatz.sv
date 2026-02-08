@@ -4,21 +4,19 @@ module collatz( input logic         clk,   // Clock
 		output logic [31:0] dout,  // Iteration value: true after go = 1
 		output logic 	    done); // True when dout reaches 1
 
-   always_ff @(posedge clk) begin
-      if (go) begin
-         if (n == 1) begin
-            dout <= 1;
-            done <= 1;
-         end else if (n % 2 == 0) begin
-            dout <= n / 2;
-         end else begin
-            dout <= 3 * n + 1;
-         end
-      end else begin
-         dout <= n; 
-         done <= 0;
-      end
-
-   end
+    always_ff @(posedge clk) begin
+        if (go) begin
+            dout <= n;
+            done <= 1'b0;
+        end else if (!done) begin
+            if (dout == 32'd1) begin
+                done <= 1'b1;            
+            end else if (dout[0] == 1'b0) begin
+                dout <= dout >> 1;       
+            end else begin
+                dout <= dout * 3 + 1;   
+            end
+        end
+    end
 
 endmodule
