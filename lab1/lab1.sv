@@ -75,7 +75,6 @@ module lab1( input logic CLOCK_50,  // 50 MHz Clock input
             if (done_seen) count_reg <= count;
 
 
-
             if (key_pressed[3] && !key_pressed_d[3]) begin
                   base_n <= {22'b0, SW}; //SW[9:0] as start value
                   offset <= 8'd0;
@@ -92,12 +91,12 @@ module lab1( input logic CLOCK_50,  // 50 MHz Clock input
             if (done_seen) begin
                   // KEY[0]: increment (short press OR long press tick)
                   if ( (key_pressed[0] && !key_pressed_d[0]) || (key_pressed[0] && tick) ) begin
-                        if (offset != 8'hFF) offset <= offset + 8'd1; // clamp
+                        if (offset != 8'hFF) offset <= offset + 8'd1;
                   end
 
                   // KEY[1]: decrement (short press OR long press tick)
                   if ( (key_pressed[1] && !key_pressed_d[1]) || (key_pressed[1] && tick) ) begin
-                        if (offset != 8'h00) offset <= offset - 8'd1; // clamp
+                        if (offset != 8'h00) offset <= offset - 8'd1; /
                   end
             end
 
