@@ -5,131 +5,149 @@
 // By: <your name here>
 // Uni: <your uni here>
 
-module lab1(
-    input  logic        CLOCK_50,  // 50 MHz Clock input
-    input  logic [3:0]  KEY,        // Pushbuttons; KEY[0] is rightmost (active-low on DE1-SoC)
-    input  logic [9:0]  SW,         // Switches; SW[0] is rightmost
-    // 7-segment LED displays; HEX0 is rightmost
-    output logic [6:0]  HEX0, HEX1, HEX2, HEX3, HEX4, HEX5,
-    output logic [9:0]  LEDR        // LEDs above the switches; LEDR[0] on right
-);
+module lab1( input logic CLOCK_50,  // 50 MHz Clock input
+             input logic [3:0]  KEY, // Pushbuttons; KEY[0] is rightmost (active-low)
+             input logic [9:0]  SW,  // Switches; SW[0] is rightmost
+             output logic [6:0] HEX0, HEX1, HEX2, HEX3, HEX4, HEX5,
+             output logic [9:0] LEDR
+             );
 
-    // -----------------------
-    // Wires to range.sv core
-    // -----------------------
-    logic        clk, go, done;
-    logic [31:0] start;
-    logic [15:0] count;
+   logic clk, go, done;
+   logic [31:0] start;
+   logic [15:0] count;
 
-    assign clk = CLOCK_50;
+   logic [11:0] n;
 
-    // RAM_WORDS = 256, RAM_ADDR_BITS = 8
-    range #(256, 8) r ( .* ); // Connect clk/go/start/done/count by name
+   assign clk = CLOCK_50;
 
-    // -----------------------
-    // UI / control registers
-    // -----------------------
-    logic [31:0] base_n   = 32'd0;  // starting n (from switches)
-    logic [7:0]  offset   = 8'd0;   // which entry to read back (0..255)
-    logic        done_seen= 1'b0;   // latched "done" for UI
-    logic [15:0] count_reg= 16'd0;  // stable copy of count for display
+   range #(256, 8) r ( .* ); // connects clk/go/start/done/count by name
 
-    logic [3:0]  key_pressed, key_pressed_d; // pressed==1 after invert
-    logic [22:0] hold_cnt = 23'd0;
-    logic        tick     = 1'b0;
+   // ----------------------------
+   // UI regs
+   // ----------------------------
+   logic [31:0] base_n;
+   logic [7:0]  offset;
+   logic        done_seen;
 
-    logic        go_reg   = 1'b0; // 1-cycle pulse for range.go
+   // edge detect keys (pressed=1 when down)
+   logic [3:0]  key_pressed, key_pressed_d;
 
-    // -----------------------
-    // Display helpers
-    // -----------------------
-    logic [31:0] cur_n;   // n being displayed (base_n + offset)
-    logic [11:0] n12;     // low 12 bits of n
-    logic [11:0] c12;     // low 12 bits of count
+   // long press tick (~6 Hz, acceptable for "about 5/sec")
+   logic [22:0] hold_cnt;
+   logic        tick;
 
-    assign key_pressed = ~KEY; // DE1-SoC keys are active-low
-    assign go          = go_reg;
+   // go pulse generation (delayed 1 cycle)
+   logic go_reg;
+   logic go_pending;
 
-    // During compute phase (done_seen==0), range expects start = base_n.
-    // During read/display phase, range expects start = offset (address).
-    assign start = done_seen ? {24'b0, offset} : base_n;
+   // robust done edge detection
+   logic done_d;
+   logic ui_running;
 
-    // What we show on HEX3-HEX5: base_n + offset (low 12 bits)
-    assign cur_n = base_n + {24'b0, offset};
-    assign n12   = cur_n[11:0];
+   // display helpers
+   logic [31:0] cur_n;
+   logic [11:0] n12;
+   logic [11:0] c12;
 
-    // What we show on HEX0-HEX2: iteration count (low 12 bits)
-    assign c12   = count_reg[11:0];
+   assign key_pressed = ~KEY; // KEY is active-low on DE1-SoC
+   assign go = go_reg;
 
-    // -----------------------
-    // LEDs
-    // -----------------------
-    always_comb begin
-        LEDR      = SW;
-        LEDR[9]   = done_seen;   // 1 when results ready / read mode
-        LEDR[8]   = ~done_seen;  // 1 when busy computing
-    end
+   // start mux: before done -> base_n; after done -> RAM address (offset)
+   always_comb begin
+      start = done_seen ? {24'b0, offset} : base_n;
+   end
 
-    // -----------------------
-    // Key handling / long-press ticker / go pulse
-    // -----------------------
-    always_ff @(posedge clk) begin
-        // defaults
-        go_reg         <= 1'b0;
-        key_pressed_d  <= key_pressed;
+   assign cur_n = base_n + {24'b0, offset};
+   assign n12   = cur_n[11:0];
+   assign n     = n12;
 
-        // long-press tick (simple divider)
-        hold_cnt <= hold_cnt + 23'd1;
-        tick     <= (hold_cnt == 23'd0);
+   // show count only after done_seen; before that show 000
+   assign c12 = done_seen ? count[11:0] : 12'h000;
 
-        // latch done (range.done is asserted in read mode)
-        if (done) begin
-            done_seen <= 1'b1;
-        end
+   // LEDs: SW + status
+   always_comb begin
+      LEDR    = SW;
+      LEDR[9] = done_seen;   // ready
+      LEDR[8] = ~done_seen;  // busy
 
-        // capture count for display only when in read mode
-        if (done_seen) begin
-            count_reg <= count;
-        end
+      // Optional debug (LED0 go is too fast to see by eye, but keep if you want):
+      // LEDR[0] = go;
+      // LEDR[1] = done;
+   end
 
-        // KEY[3]: start a new run (load base_n from switches, clear offset, clear done_seen)
-        if (key_pressed[3] && !key_pressed_d[3]) begin
-            base_n    <= {22'b0, SW}; // SW[9:0] as start value
-            offset    <= 8'd0;
-            done_seen <= 1'b0;
-            count_reg <= 16'd0;
-            go_reg    <= 1'b1;        // 1-cycle pulse
-        end
+   // ----------------------------
+   // Sequential UI logic
+   // ----------------------------
+   always_ff @(posedge clk) begin
+      // defaults
+      go_reg <= 1'b0;
 
-        // KEY[2]: reset offset to 0 (only meaningful after done)
-        if (key_pressed[2] && !key_pressed_d[2]) begin
-            offset <= 8'd0;
-        end
+      // sample key history for edge detect
+      key_pressed_d <= key_pressed;
 
-        // After done, KEY[0]/KEY[1] browse offset, short press or long press
-        if (done_seen) begin
-            // KEY[0]: increment offset
-            if ( (key_pressed[0] && !key_pressed_d[0]) || (key_pressed[0] && tick) ) begin
-                if (offset != 8'hFF) offset <= offset + 8'd1;
-            end
+      // tick generator
+      hold_cnt <= hold_cnt + 23'd1;
+      tick <= (hold_cnt == 23'd0);
 
-            // KEY[1]: decrement offset
-            if ( (key_pressed[1] && !key_pressed_d[1]) || (key_pressed[1] && tick) ) begin
-                if (offset != 8'h00) offset <= offset - 8'd1;
-            end
-        end
-    end
+      // done edge detect
+      done_d <= done;
 
-    // -----------------------
-    // 7-seg display mapping
-    // HEX5 HEX4 HEX3  HEX2 HEX1 HEX0
-    //   n[11:8] n[7:4] n[3:0]   c[11:8] c[7:4] c[3:0]
-    // -----------------------
-    hex7seg h0(.a(c12[3:0]),   .y(HEX0));
-    hex7seg h1(.a(c12[7:4]),   .y(HEX1));
-    hex7seg h2(.a(c12[11:8]),  .y(HEX2));
-    hex7seg h3(.a(n12[3:0]),   .y(HEX3));
-    hex7seg h4(.a(n12[7:4]),   .y(HEX4));
-    hex7seg h5(.a(n12[11:8]),  .y(HEX5));
+      // emit go pulse one cycle after KEY3 edge
+      if (go_pending) begin
+         go_reg <= 1'b1;
+         go_pending <= 1'b0;
+         ui_running <= 1'b1;
+      end
+
+      // latch completion ONLY on rising edge of done, and only if we started a run
+      if (ui_running && done && !done_d) begin
+         done_seen  <= 1'b1;
+         ui_running <= 1'b0;
+      end
+
+      // KEY[3] press edge: start a new run
+      if (key_pressed[3] && !key_pressed_d[3]) begin
+         base_n     <= {22'b0, SW}; // latch SW[9:0]
+         offset     <= 8'd0;
+         done_seen  <= 1'b0;
+         go_pending <= 1'b1;
+
+         // reset run bookkeeping so stale done can't instantly "complete"
+         ui_running <= 1'b0;
+         done_d     <= 1'b0;
+      end
+
+      // KEY[2] press edge: reset offset
+      if (key_pressed[2] && !key_pressed_d[2]) begin
+         offset <= 8'd0;
+      end
+
+      // browse results only after done
+      if (done_seen) begin
+         // KEY[0] increment
+         if ( (key_pressed[0] && !key_pressed_d[0]) || (key_pressed[0] && tick) ) begin
+            if (offset != 8'hFF) offset <= offset + 8'd1; // clamp
+         end
+
+         // KEY[1] decrement
+         if ( (key_pressed[1] && !key_pressed_d[1]) || (key_pressed[1] && tick) ) begin
+            if (offset != 8'h00) offset <= offset - 8'd1; // clamp
+         end
+      end
+   end
+
+   // ----------------------------
+   // 7-seg wiring:
+   // HEX5 HEX4 HEX3 = n (low 12 bits)
+   // HEX2 HEX1 HEX0 = count (low 12 bits)
+   // ----------------------------
+   hex7seg hn0(.a(n12[3:0]),  .y(HEX3));
+   hex7seg hn1(.a(n12[7:4]),  .y(HEX4));
+   hex7seg hn2(.a(n12[11:8]), .y(HEX5));
+
+   hex7seg hc0(.a(c12[3:0]),  .y(HEX0));
+   hex7seg hc1(.a(c12[7:4]),  .y(HEX1));
+   hex7seg hc2(.a(c12[11:8]), .y(HEX2));
 
 endmodule
+
