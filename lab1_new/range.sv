@@ -33,13 +33,10 @@ module range
    // Address mux: write uses num; read uses start[...]
    assign addr = we ? num : start[RAM_ADDR_BITS-1:0];
 
-   // Sync read/write RAM: count updates on next cycle
    always_ff @(posedge clk) begin
       if (we) mem[addr] <= din;
       count <= mem[addr];
    end
-
-   // --------------- Controller FSM ---------------
 
    typedef enum logic [2:0] {S_IDLE, S_LAUNCH, S_RUN, S_WRITE, S_DONE} state_t;
    state_t state;
@@ -52,48 +49,33 @@ module range
 
    // Combinational outputs from state
    always_comb begin
-      // defaults
       cgo  = 1'b0;
       we   = 1'b0;
       din  = iter_count;
       done = 1'b0;
 
       unique case (state)
-         S_IDLE: begin
-            // waiting for go
-         end
-
          S_LAUNCH: begin
-            // pulse collatz go for one cycle
             cgo = 1'b1;
          end
 
-         S_RUN: begin
-            // wait until cdone becomes 1
-         end
-
          S_WRITE: begin
-            // write iter_count into RAM at address num
             we  = 1'b1;
             din = iter_count;
          end
 
          S_DONE: begin
-            done = 1'b1; // RAM is filled; now start is an address to read
-         end
-
-         default: begin
+            done = 1'b1; 
          end
       endcase
    end
 
-   // Sequential FSM / registers
    always_ff @(posedge clk) begin
       unique case (state)
 
          S_IDLE: begin
             if (go) begin
-               // restart cleanly
+               // restart
                base_start <= start;
                num        <= '0;
                iter_count <= 16'd0;
@@ -102,15 +84,12 @@ module range
          end
 
          S_LAUNCH: begin
-            // collatz will sample n on this clock (because cgo=1 in this state)
             // initialize counter to 1 (sequence length includes the starting value)
             iter_count <= 16'd1;
             state <= S_RUN;
          end
 
          S_RUN: begin
-            // IMPORTANT: cdone is observed one cycle after collatz reaches 1,
-            // which is perfect: we increment on the cycle that produces the '1'
             if (!cdone) begin
                iter_count <= iter_count + 16'd1;
             end else begin
@@ -119,7 +98,6 @@ module range
          end
 
          S_WRITE: begin
-            // write happens on this clock edge (we=1 during S_WRITE)
             if (num == RAM_WORDS-1) begin
                state <= S_DONE;
             end else begin
@@ -143,8 +121,7 @@ module range
          end
       endcase
    end
-
-   // initial state (safe for sim; FPGA power-up typically sets regs too)
+   
    initial begin
       state      = S_IDLE;
       base_start = 32'd0;
@@ -153,3 +130,4 @@ module range
    end
 
 endmodule
+
