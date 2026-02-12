@@ -1,151 +1,234 @@
 // CSEE 4840 Lab 1: Run and Display Collatz Conjecture Iteration Counts
-//
-// Spring 2023
-//
-// By: <your name here>
-// Uni: <your uni here>
+// Fixed: Keep debounce/long-press structure, add correct blink + done edge latch
 
 module lab1(
-    input  logic        CLOCK_50,  // 50 MHz Clock input
-    input  logic [3:0]  KEY,        // Pushbuttons; KEY[0] is rightmost (active-low on DE1-SoC)
-    input  logic [9:0]  SW,         // Switches; SW[0] is rightmost
-    // 7-segment LED displays; HEX0 is rightmost
-    output logic [6:0]  HEX0, HEX1, HEX2, HEX3, HEX4, HEX5,
-    output logic [9:0]  LEDR        // LEDs above the switches; LEDR[0] on right
+    input  logic        CLOCK_50,
+    input  logic [3:0]   KEY,   // active-low
+    input  logic [9:0]   SW,
+    output logic [6:0]   HEX0, HEX1, HEX2, HEX3, HEX4, HEX5,
+    output logic [9:0]   LEDR
 );
 
-    // -----------------------
-    // Wires to range.sv core
-    // -----------------------
-    logic        clk, go, done;
+    logic clk, go, done;
     logic [31:0] start;
     logic [15:0] count;
+    logic [11:0] n;
 
     assign clk = CLOCK_50;
 
-    // RAM_WORDS = 256, RAM_ADDR_BITS = 8
-    range #(256, 8) r ( .* ); // Connect clk/go/start/done/count by name
+    range #(256, 8) r ( .* ); // connects clk/go/start/done/count by name
 
-    // -----------------------
-    // UI / control registers
-    // -----------------------
-    logic [31:0] base_n   = 32'd0;  // starting n (from switches)
-    logic [7:0]  offset   = 8'd0;   // which entry to read back (0..255)
-    logic        done_seen= 1'b0;   // latched "done" for UI
-    logic [15:0] count_reg= 16'd0;  // stable copy of count for display
+    // ----------------------------
+    // UI regs
+    // ----------------------------
+    logic [31:0] base_n    = 32'd0;
+    logic [7:0]  offset    = 8'd0;
+    logic        done_seen = 1'b0;
+    logic [15:0] count_reg = 16'd0;
 
-    logic [3:0]  key_pressed, key_pressed_d; // pressed==1 after invert
-    logic [22:0] hold_cnt = 23'd0;
-    logic        tick     = 1'b0;
+    // 1-cycle go pulse
+    logic go_reg = 1'b0;
+    assign go = go_reg;
 
-// Blink generator for LEDR[9] (done indicator)
-localparam int BLINK_HALF_CYCLES = 25_000_000; // 0.5s @ 50MHz => 1Hz blink
-logic [$clog2(BLINK_HALF_CYCLES)-1:0] blink_cnt = '0;
-logic blink = 1'b0;
+    // done edge detection (NEW)
+    logic done_d = 1'b0;
+    logic ui_running = 1'b0;
 
-    logic        go_reg   = 1'b0; // 1-cycle pulse for range.go
+    // display helpers
+    logic [31:0] cur_n;
+    logic [11:0] n12;
+    logic [11:0] c12;
 
-    // -----------------------
-    // Display helpers
-    // -----------------------
-    logic [31:0] cur_n;   // n being displayed (base_n + offset)
-    logic [11:0] n12;     // low 12 bits of n
-    logic [11:0] c12;     // low 12 bits of count
+    // ----------------------------
+    // BLINK GENERATOR
+    // ----------------------------
+    localparam int BLINK_HALF_CYCLES = 25_000_000; // 0.5s @ 50MHz => 1Hz blink
+    logic [$clog2(BLINK_HALF_CYCLES)-1:0] blink_cnt = '0;
+    logic blink = 1'b0;
 
-    assign key_pressed = ~KEY; // DE1-SoC keys are active-low
-    assign go          = go_reg;
-
-    // During compute phase (done_seen==0), range expects start = base_n.
-    // During read/display phase, range expects start = offset (address).
+    // start mux: before done -> base_n; after done -> RAM address (offset)
     assign start = done_seen ? {24'b0, offset} : base_n;
 
-    // What we show on HEX3-HEX5: base_n + offset (low 12 bits)
+    // compute displayed n
     assign cur_n = base_n + {24'b0, offset};
     assign n12   = cur_n[11:0];
+    assign n     = n12;
 
-    // What we show on HEX0-HEX2: iteration count (low 12 bits)
-    assign c12   = count_reg[11:0];
+    // IMPORTANT: don’t show stale count while computing (NEW)
+    assign c12   = done_seen ? count_reg[11:0] : 12'h000;
 
-    // -----------------------
-    // LEDs
-    // -----------------------
+    // ----------------------------
+    // LEDs: SW + status with BLINK
+    // ----------------------------
     always_comb begin
-        LEDR      = SW;
-              LEDR[9] = done_seen ? blink : 1'b0;  // blink when ready
-        LEDR[8]   = ~done_seen;  // 1 when busy computing
+        LEDR    = SW;
+        LEDR[9] = done_seen ? blink : 1'b0;  // blink when results ready
+        LEDR[8] = ~done_seen;                // 1 when busy
     end
 
-    // -----------------------
-    // Key handling / long-press ticker / go pulse
-    // -----------------------
+    // ============================================================
+    // Key sync + debounce (KEEP AS-IS)
+    // ============================================================
+    logic [3:0] key_sync1 = 4'b0, key_sync2 = 4'b0;
+    logic [3:0] key_db    = 4'b0, key_db_d  = 4'b0; // debounced, pressed=1
+    logic [31:0] db_cnt0 = 0, db_cnt1 = 0, db_cnt2 = 0, db_cnt3 = 0;
+
+    localparam int DB_CYCLES = 50_000; // 1ms @ 50MHz
+
+    always_ff @(posedge clk) begin
+        // 2-FF synchronizer (pressed=1)
+        key_sync1 <= ~KEY;
+        key_sync2 <= key_sync1;
+
+        // debounce each key (update key_db only after stable for DB_CYCLES)
+        if (key_sync2[0] == key_db[0]) db_cnt0 <= 0;
+        else if (db_cnt0 == DB_CYCLES-1) begin key_db[0] <= key_sync2[0]; db_cnt0 <= 0; end
+        else db_cnt0 <= db_cnt0 + 1;
+
+        if (key_sync2[1] == key_db[1]) db_cnt1 <= 0;
+        else if (db_cnt1 == DB_CYCLES-1) begin key_db[1] <= key_sync2[1]; db_cnt1 <= 0; end
+        else db_cnt1 <= db_cnt1 + 1;
+
+        if (key_sync2[2] == key_db[2]) db_cnt2 <= 0;
+        else if (db_cnt2 == DB_CYCLES-1) begin key_db[2] <= key_sync2[2]; db_cnt2 <= 0; end
+        else db_cnt2 <= db_cnt2 + 1;
+
+        if (key_sync2[3] == key_db[3]) db_cnt3 <= 0;
+        else if (db_cnt3 == DB_CYCLES-1) begin key_db[3] <= key_sync2[3]; db_cnt3 <= 0; end
+        else db_cnt3 <= db_cnt3 + 1;
+
+        key_db_d <= key_db;
+    end
+
+    wire k0_rise = key_db[0] & ~key_db_d[0];
+    wire k1_rise = key_db[1] & ~key_db_d[1];
+    wire k2_rise = key_db[2] & ~key_db_d[2];
+    wire k3_rise = key_db[3] & ~key_db_d[3];
+
+    // ----------------------------
+    // Long-press repeat (KEEP AS-IS)
+    // ----------------------------
+    localparam int DELAY_CYCLES  = 50_000_000 / 4;   // 0.25s
+    localparam int REPEAT_CYCLES = 50_000_000 / 5;  // 10 Hz
+
+    logic [31:0] k0_delay_cnt = 0, k0_rep_cnt = 0;
+    logic [31:0] k1_delay_cnt = 0, k1_rep_cnt = 0;
+    logic        k0_repeating = 0, k1_repeating = 0;
+
+    // ----------------------------
+    // Sequential UI logic + BLINK + DONE EDGE
+    // ----------------------------
     always_ff @(posedge clk) begin
         // defaults
-        go_reg         <= 1'b0;
-        key_pressed_d  <= key_pressed;
+        go_reg <= 1'b0;
 
-        // long-press tick (simple divider)
-        hold_cnt <= hold_cnt + 23'd1;
-        tick     <= (hold_cnt == 23'd0);
+        // track previous done (NEW)
+        done_d <= done;
 
-// blink update (only active after done_seen=1)
-if (!done_seen) begin
-   blink_cnt <= '0;
-   blink     <= 1'b0;
-end else if (blink_cnt == BLINK_HALF_CYCLES-1) begin
-   blink_cnt <= '0;
-   blink     <= ~blink;
-end else begin
-   blink_cnt <= blink_cnt + 1'b1;
-end
-
-        // latch done (range.done is asserted in read mode)
-        if (done) begin
-            done_seen <= 1'b1;
+        // blink update
+        if (!done_seen) begin
+            blink_cnt <= '0;
+            blink     <= 1'b0;
+        end else if (blink_cnt == BLINK_HALF_CYCLES-1) begin
+            //blink_cnt <= '0;
+            blink     <= ~blink;
+        end else begin
+            blink_cnt <= blink_cnt + 1'b1;
         end
 
-        // capture count for display only when in read mode
+        // latch count for display only when in read mode
         if (done_seen) begin
             count_reg <= count;
         end
 
-        // KEY[3]: start a new run (load base_n from switches, clear offset, clear done_seen)
-        if (key_pressed[3] && !key_pressed_d[3]) begin
-            base_n    <= {22'b0, SW}; // SW[9:0] as start value
-            offset    <= 8'd0;
-            done_seen <= 1'b0;
-            count_reg <= 16'd0;
-            go_reg    <= 1'b1;        // 1-cycle pulse
+        // done_seen latch ONLY on rising edge (NEW)
+        if (ui_running && done && !done_d) begin
+            done_seen   <= 1'b1;
+            ui_running  <= 1'b0;
         end
 
-        // KEY[2]: reset offset to 0 (only meaningful after done)
-        if (key_pressed[2] && !key_pressed_d[2]) begin
-            offset <= 8'd0;
-        end
+        // KEY3: start a new run
+        if (k3_rise) begin
+            base_n     <= {22'b0, SW};
+            offset     <= 8'd0;
+            done_seen  <= 1'b0;
+            count_reg  <= 16'd0;
 
-        // After done, KEY[0]/KEY[1] browse offset, short press or long press
-        if (done_seen) begin
-            // KEY[0]: increment offset
-            if ( (key_pressed[0] && !key_pressed_d[0]) || (key_pressed[0] && tick) ) begin
-                if (offset != 8'hFF) offset <= offset + 8'd1;
+            // mark that we're running (NEW)
+            ui_running <= 1'b1;
+
+            // pulse go for 1 cycle (range will see it next cycle)
+            go_reg     <= 1'b1;
+
+            // reset long-press state
+            k0_delay_cnt <= 0; k0_rep_cnt <= 0; k0_repeating <= 0;
+            k1_delay_cnt <= 0; k1_rep_cnt <= 0; k1_repeating <= 0;
+        end
+        else begin
+            // KEY2: reset offset
+            if (k2_rise) begin
+                offset <= 8'd0;
             end
 
-            // KEY[1]: decrement offset
-            if ( (key_pressed[1] && !key_pressed_d[1]) || (key_pressed[1] && tick) ) begin
-                if (offset != 8'h00) offset <= offset - 8'd1;
+            // Browse only after done
+            if (done_seen) begin
+                // KEY0 increment
+                if (!key_db[0]) begin
+                    k0_delay_cnt <= 0; k0_rep_cnt <= 0; k0_repeating <= 0;
+                end else begin
+                    if (k0_rise) begin
+                        if (offset != 8'hFF) offset <= offset + 1;
+                        k0_delay_cnt <= 0; k0_rep_cnt <= 0; k0_repeating <= 0;
+                    end else if (!k0_repeating) begin
+                        if (k0_delay_cnt >= (DELAY_CYCLES-1)) begin
+                            k0_repeating <= 1'b1; k0_rep_cnt <= 0;
+                        end else k0_delay_cnt <= k0_delay_cnt + 1;
+                    end else begin
+                        if (k0_rep_cnt >= (REPEAT_CYCLES-1)) begin
+                            if (offset != 8'hFF) offset <= offset + 1;
+                            k0_rep_cnt <= 0;
+                        end else k0_rep_cnt <= k0_rep_cnt + 1;
+                    end
+                end
+
+                // KEY1 decrement
+                if (!key_db[1]) begin
+                    k1_delay_cnt <= 0; k1_rep_cnt <= 0; k1_repeating <= 0;
+                end else begin
+                    if (k1_rise) begin
+                        if (offset != 8'h00) offset <= offset - 1;
+                        k1_delay_cnt <= 0; k1_rep_cnt <= 0; k1_repeating <= 0;
+                    end else if (!k1_repeating) begin
+                        if (k1_delay_cnt >= (DELAY_CYCLES-1)) begin
+                            k1_repeating <= 1'b1; k1_rep_cnt <= 0;
+                        end else k1_delay_cnt <= k1_delay_cnt + 1;
+                    end else begin
+                        if (k1_rep_cnt >= (REPEAT_CYCLES-1)) begin
+                            if (offset != 8'h00) offset <= offset - 1;
+                            k1_rep_cnt <= 0;
+                        end else k1_rep_cnt <= k1_rep_cnt + 1;
+                    end
+                end
+            end
+            else begin
+                // not done: keep long-press state reset
+                k0_delay_cnt <= 0; k0_rep_cnt <= 0; k0_repeating <= 0;
+                k1_delay_cnt <= 0; k1_rep_cnt <= 0; k1_repeating <= 0;
             end
         end
     end
 
-    // -----------------------
-    // 7-seg display mapping
-    // HEX5 HEX4 HEX3  HEX2 HEX1 HEX0
-    //   n[11:8] n[7:4] n[3:0]   c[11:8] c[7:4] c[3:0]
-    // -----------------------
-    hex7seg h0(.a(c12[3:0]),   .y(HEX0));
-    hex7seg h1(.a(c12[7:4]),   .y(HEX1));
-    hex7seg h2(.a(c12[11:8]),  .y(HEX2));
-    hex7seg h3(.a(n12[3:0]),   .y(HEX3));
-    hex7seg h4(.a(n12[7:4]),   .y(HEX4));
-    hex7seg h5(.a(n12[11:8]),  .y(HEX5));
+    // ----------------------------
+    // 7-seg wiring:
+    // HEX5 HEX4 HEX3 = n
+    // HEX2 HEX1 HEX0 = count
+    // ----------------------------
+    hex7seg h_n0 (.a(n12[3:0]),  .y(HEX3));
+    hex7seg h_n1 (.a(n12[7:4]),  .y(HEX4));
+    hex7seg h_n2 (.a(n12[11:8]), .y(HEX5));
+
+    hex7seg h_c0 (.a(c12[3:0]),  .y(HEX0));
+    hex7seg h_c1 (.a(c12[7:4]),  .y(HEX1));
+    hex7seg h_c2 (.a(c12[11:8]), .y(HEX2));
 
 endmodule
