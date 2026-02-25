@@ -1,14 +1,13 @@
-```c
 /*
  *
  * CSEE 4840 Lab 2
  *
  * Name/UNI: Please Change to Yourname (pcy2301)
  *
- * Modified: Framebuffer UI (chat window + 2-line input), basic editing,
- *          and thread-safe rendering.
- *
- * Debug: show current HID modifiers + keycode[6] on row 1.
+ * Framebuffer UI (chat window + 2-line input), basic editing,
+ * thread-safe rendering, plus:
+ *   - Shift-chord stabilization (pending key commit)
+ *   - Software key repeat (hold-to-repeat)
  */
 
 #include "fbputchar.h"
@@ -22,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Update SERVER_HOST to be the IP address of the chat server you are connecting to */
@@ -47,11 +47,16 @@
 
 /* Keep a title line at row 0; chat messages start from row 1 */
 #define TITLE_ROW      0
-#define CHAT_TOP       2                                   /* row 1 reserved for debug */
-#define CHAT_VISIBLE   (SEP_ROW - CHAT_TOP)                 /* rows 2..20 (19 rows) */
+#define CHAT_TOP       1
+#define CHAT_VISIBLE   (SEP_ROW - CHAT_TOP)                 /* rows 1..20 (20 rows) */
 
 #define CHAT_HISTORY   200
 #define INPUT_CAP      (FB_COLS * INPUT_ROWS)               /* 128 chars */
+
+/* ---- Timing knobs ---- */
+#define PENDING_TIMEOUT_MS  25   /* wait a tiny bit for Shift to show up */
+#define REPEAT_DELAY_MS     350  /* start repeating after 350ms */
+#define REPEAT_RATE_MS      55   /* repeat every 55ms */
 
 /* Socket file descriptor */
 static int sockfd = -1;
@@ -80,6 +85,19 @@ typedef struct {
 static UIState ui;
 static pthread_mutex_t ui_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* ---------- Small time helpers ---------- */
+static long elapsed_ms(const struct timespec *start, const struct timespec *end) {
+  long sec = (long)(end->tv_sec - start->tv_sec);
+  long nsec = (long)(end->tv_nsec - start->tv_nsec);
+  return sec * 1000 + nsec / 1000000;
+}
+
+static void now_ts(struct timespec *t) {
+  clock_gettime(CLOCK_MONOTONIC, t);
+}
+
+/* ---------- Framebuffer helpers ---------- */
+
 static void fb_clear_row(int row) {
   for (int c = 0; c < FB_COLS; c++) fbputchar(' ', row, c);
 }
@@ -87,24 +105,6 @@ static void fb_clear_row(int row) {
 static void fb_clear_screen(void) {
   for (int r = 0; r < FB_ROWS; r++) fb_clear_row(r);
 }
-
-/* ---------- Debug overlay (row 1) ---------- */
-
-static void debug_draw_keys_locked(uint8_t modifiers, const uint8_t keys[6]) {
-  char buf[FB_COLS + 1];
-  int n = 0;
-
-  n += snprintf(buf + n, sizeof(buf) - n, "MOD:%02X  KEYS:", modifiers);
-  for (int i = 0; i < 6; i++) {
-    n += snprintf(buf + n, sizeof(buf) - n, " %02X", keys[i]);
-  }
-  buf[FB_COLS] = '\0';
-
-  fb_clear_row(1);
-  fbputs(buf, 1, 0);
-}
-
-/* ---------- UI drawing ---------- */
 
 static void ui_draw_separator_locked(void) {
   for (int c = 0; c < FB_COLS; c++) fbputchar('-', SEP_ROW, c);
@@ -204,10 +204,6 @@ static void ui_init(void) {
 
   fbputs("CSEE 4840 Chat", TITLE_ROW, 0);
 
-  /* debug row (row 1) initial */
-  fb_clear_row(1);
-  fbputs("MOD:00  KEYS: 00 00 00 00 00 00", 1, 0);
-
   ui_draw_separator_locked();
   ui_redraw_input_locked();
 
@@ -272,7 +268,7 @@ static char hid_to_ascii(uint8_t keycode, uint8_t modifiers) {
 
   /* Numbers 1-0 */
   if (keycode >= 0x1e && keycode <= 0x27) {
-    static const char normal[] = {'1','2','3','4','5','6','7','8','9','0'};
+    static const char normal[]  = {'1','2','3','4','5','6','7','8','9','0'};
     static const char shifted[] = {'!','@','#','$','%','^','&','*','(',')'};
     return shift ? shifted[keycode - 0x1e] : normal[keycode - 0x1e];
   }
@@ -297,6 +293,102 @@ static char hid_to_ascii(uint8_t keycode, uint8_t modifiers) {
 static int key_in_prev(uint8_t code, const uint8_t prev[6]) {
   for (int i = 0; i < 6; i++) if (prev[i] == code) return 1;
   return 0;
+}
+
+static int key_in_packet(uint8_t code, const struct usb_keyboard_packet *p) {
+  for (int i = 0; i < 6; i++) if (p->keycode[i] == code) return 1;
+  return 0;
+}
+
+/* ---------- Pending-key + Repeat state ---------- */
+
+typedef struct {
+  int active;
+  uint8_t key;
+  uint8_t mods_at_press;
+  struct timespec t0;
+} PendingKey;
+
+typedef struct {
+  int active;
+  uint8_t key;
+  struct timespec t_start;
+  struct timespec t_last;
+} RepeatState;
+
+static PendingKey pending = {0};
+static RepeatState repeat_state = {0};
+
+/* Commit pending key (choose modifiers depending on situation) */
+static void pending_commit(uint8_t commit_mods) {
+  pthread_mutex_lock(&ui_mutex);
+  char ch = hid_to_ascii(pending.key, commit_mods);
+  if (ch != '\0') {
+    input_insert_char_locked(ch);
+    ui_redraw_input_locked();
+  }
+  pthread_mutex_unlock(&ui_mutex);
+  pending.active = 0;
+}
+
+/* Cancel pending key (used when backspace etc. happens before commit) */
+static void pending_cancel(void) {
+  pending.active = 0;
+}
+
+/* Try to commit pending based on current report: shift showed up, timeout, or release */
+static void pending_try_commit(const struct usb_keyboard_packet *p) {
+  if (!pending.active) return;
+
+  struct timespec now;
+  now_ts(&now);
+
+  int still_held = key_in_packet(pending.key, p);
+  int shift_now  = shift_down(p->modifiers);
+  long ms        = elapsed_ms(&pending.t0, &now);
+
+  if (still_held && shift_now) {
+    /* Shift arrived shortly after key press: commit shifted */
+    pending_commit(p->modifiers);
+  } else if (!still_held) {
+    /* Key released before shift arrived: commit unshifted */
+    pending_commit(pending.mods_at_press);
+  } else if (ms >= PENDING_TIMEOUT_MS) {
+    /* Timeout: commit with original modifiers */
+    pending_commit(pending.mods_at_press);
+  }
+}
+
+/* Software key repeat (hold-to-repeat) */
+static void repeat_tick(const struct usb_keyboard_packet *p) {
+  if (!repeat_state.active) return;
+
+  /* Don't repeat a key that hasn't even been committed yet */
+  if (pending.active && pending.key == repeat_state.key) return;
+
+  if (!key_in_packet(repeat_state.key, p)) {
+    repeat_state.active = 0;
+    repeat_state.key = 0;
+    return;
+  }
+
+  struct timespec now;
+  now_ts(&now);
+
+  long held_ms = elapsed_ms(&repeat_state.t_start, &now);
+  long since_last = elapsed_ms(&repeat_state.t_last, &now);
+
+  if (held_ms >= REPEAT_DELAY_MS && since_last >= REPEAT_RATE_MS) {
+    pthread_mutex_lock(&ui_mutex);
+    char ch = hid_to_ascii(repeat_state.key, p->modifiers); /* use current mods for shift repeat */
+    if (ch != '\0') {
+      input_insert_char_locked(ch);
+      ui_redraw_input_locked();
+    }
+    pthread_mutex_unlock(&ui_mutex);
+
+    repeat_state.t_last = now;
+  }
 }
 
 /* ---------- Networking helpers ---------- */
@@ -377,12 +469,10 @@ int main(void) {
 
     if (transferred != (int)sizeof(packet)) continue;
 
-    /* DEBUG: show raw HID report on row 1 */
-    pthread_mutex_lock(&ui_mutex);
-    debug_draw_keys_locked(packet.modifiers, packet.keycode);
-    pthread_mutex_unlock(&ui_mutex);
+    /* 1) First: pending commit logic (fixes Shift arriving 1 report later) */
+    pending_try_commit(&packet);
 
-    /* Process newly pressed keys only (edge detect) */
+    /* 2) Then: handle newly pressed keys only (edge detect) */
     for (int i = 0; i < 6; i++) {
       uint8_t code = packet.keycode[i];
       if (code == 0) continue;
@@ -390,57 +480,100 @@ int main(void) {
 
       /* Special keys */
       if (code == 0x29) { /* ESC */
+        pending_cancel();
         running = 0;
         break;
       }
 
-      pthread_mutex_lock(&ui_mutex);
-
+      /* Enter/backspace/arrows should NOT be delayed by pending printable */
       if (code == 0x28) { /* Enter */
+        /* Force commit any pending printable before sending */
+        if (pending.active) {
+          pending_commit(shift_down(packet.modifiers) ? packet.modifiers : pending.mods_at_press);
+        }
+
+        pthread_mutex_lock(&ui_mutex);
+
         char line[INPUT_CAP + 1];
         strncpy(line, ui.input, INPUT_CAP);
         line[INPUT_CAP] = '\0';
 
-        /* echo locally */
         if (strlen(line) > 0) {
-          ui_add_message_locked(line);
+          ui_add_message_locked(line); /* echo locally */
         }
 
         input_clear_locked();
         ui_redraw_input_locked();
-
         pthread_mutex_unlock(&ui_mutex);
 
-        /* send outside lock */
-        if (strlen(line) > 0) {
-          send_line_to_server(line);
-        }
+        if (strlen(line) > 0) send_line_to_server(line);
+        continue;
+      }
 
-      } else if (code == 0x2a) { /* Backspace */
+      if (code == 0x2a) { /* Backspace */
+        /* If a char is pending (not committed yet), just cancel it */
+        if (pending.active) {
+          pending_cancel();
+          continue;
+        }
+        pthread_mutex_lock(&ui_mutex);
         input_backspace_locked();
         ui_redraw_input_locked();
         pthread_mutex_unlock(&ui_mutex);
+        continue;
+      }
 
-      } else if (code == 0x50) { /* Left Arrow */
+      if (code == 0x50) { /* Left Arrow */
+        if (pending.active) pending_commit(pending.mods_at_press);
+        pthread_mutex_lock(&ui_mutex);
         input_move_left_locked();
         ui_redraw_input_locked();
         pthread_mutex_unlock(&ui_mutex);
+        continue;
+      }
 
-      } else if (code == 0x4f) { /* Right Arrow */
+      if (code == 0x4f) { /* Right Arrow */
+        if (pending.active) pending_commit(pending.mods_at_press);
+        pthread_mutex_lock(&ui_mutex);
         input_move_right_locked();
         ui_redraw_input_locked();
         pthread_mutex_unlock(&ui_mutex);
+        continue;
+      }
 
-      } else {
-        char ch = hid_to_ascii(code, packet.modifiers);
-        if (ch != '\0') {
-          input_insert_char_locked(ch);
-          ui_redraw_input_locked();
-        }
+      /* Printable keys */
+      char ch_now = hid_to_ascii(code, packet.modifiers);
+      if (ch_now == '\0') continue;
+
+      /* Start repeat tracking for this printable key */
+      struct timespec now;
+      now_ts(&now);
+      repeat_state.active = 1;
+      repeat_state.key = code;
+      repeat_state.t_start = now;
+      repeat_state.t_last = now;
+
+      /* If shift is down NOW, commit immediately. Otherwise, delay briefly. */
+      if (shift_down(packet.modifiers)) {
+        pthread_mutex_lock(&ui_mutex);
+        input_insert_char_locked(ch_now);
+        ui_redraw_input_locked();
         pthread_mutex_unlock(&ui_mutex);
+      } else {
+        /* If another pending exists, commit it unshifted first */
+        if (pending.active) pending_commit(pending.mods_at_press);
+
+        pending.active = 1;
+        pending.key = code;
+        pending.mods_at_press = packet.modifiers; /* likely 0 */
+        pending.t0 = now;
       }
     }
 
+    /* 3) Repeat tick (hold-to-repeat) */
+    repeat_tick(&packet);
+
+    /* 4) Update prev_keys */
     memcpy(prev_keys, packet.keycode, sizeof(prev_keys));
   }
 
@@ -475,4 +608,3 @@ static void *network_thread_f(void *ignored) {
 
   return NULL;
 }
-```
