@@ -371,11 +371,6 @@ int main(void) {
         strncpy(line, ui.input, INPUT_CAP);
         line[INPUT_CAP] = '\0';
 
-        /* echo locally */
-        if (strlen(line) > 0) {
-          ui_add_message_locked(line);
-        }
-
         input_clear_locked();
         ui_redraw_input_locked();
 
