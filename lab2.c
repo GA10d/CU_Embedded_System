@@ -2,7 +2,7 @@
  *
  * CSEE 4840 Lab 2
  *
- * Name/UNI: Please Change to Yourname (pcy2301)
+ * Name/UNI: Jiyang Yin (jy3557), Zhewen Guo (zg2567), Yang Li (yl6070)
  *
  * Modified: Framebuffer UI (chat window + 2-line input), basic editing,
  *          and thread-safe rendering.
