@@ -3,9 +3,6 @@
  * CSEE 4840 Lab 2
  *
  * Name/UNI: Jiyang Yin (jy3557), Zhewen Guo (zg2567), Yang Li (yl6070)
- *
- * Modified: Framebuffer UI (chat window + 2-line input), basic editing,
- *          and thread-safe rendering.
  */
 
 #include "fbputchar.h"
@@ -39,18 +36,18 @@
 #define FB_ROWS 24
 
 #define INPUT_ROWS 2
-#define SEP_ROWS   1
+#define SEP_ROWS 1
 
-#define SEP_ROW        (FB_ROWS - INPUT_ROWS - SEP_ROWS)   /* 21 */
-#define INPUT_ROW0     (SEP_ROW + 1)                       /* 22 */
-#define INPUT_ROW1     (SEP_ROW + 2)                       /* 23 */
+#define SEP_ROW (FB_ROWS - INPUT_ROWS - SEP_ROWS)  
+#define INPUT_ROW0 (SEP_ROW + 1)   
+#define INPUT_ROW1 (SEP_ROW + 2)  
 
-#define TITLE_ROW      0
-#define CHAT_TOP       1
-#define CHAT_VISIBLE   (SEP_ROW - CHAT_TOP)                 /* rows 1..20 (20 rows) */
+#define TITLE_ROW 0
+#define CHAT_TOP 1
+#define CHAT_VISIBLE (SEP_ROW - CHAT_TOP)         
 
-#define CHAT_HISTORY   200
-#define INPUT_CAP      (FB_COLS * INPUT_ROWS)               /* 128 chars */
+#define CHAT_HISTORY 200
+#define INPUT_CAP (FB_COLS * INPUT_ROWS)   
 
 static int sockfd = -1;
 
