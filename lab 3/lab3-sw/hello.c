@@ -12,55 +12,28 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <string.h>
 #include <unistd.h>
-
-#define SCREEN_WIDTH 640
-#define SCREEN_HEIGHT 480
-#define BALL_RADIUS 16
 
 int vga_ball_fd;
 
-/* Read and print the background color */
-void print_background_color() {
-  vga_ball_arg_t vla;
-  
-  if (ioctl(vga_ball_fd, VGA_BALL_READ_BACKGROUND, &vla)) {
-      perror("ioctl(VGA_BALL_READ_BACKGROUND) failed");
-      return;
-  }
-  printf("%02x %02x %02x\n",
-	 vla.background.red, vla.background.green, vla.background.blue);
-}
-
-/* Set the background color */
-void set_background_color(const vga_ball_color_t *c)
+/* Read and print the ball position */
+void print_ball_position(void)
 {
   vga_ball_arg_t vla;
-  vla.background = *c;
-  if (ioctl(vga_ball_fd, VGA_BALL_WRITE_BACKGROUND, &vla)) {
-      perror("ioctl(VGA_BALL_SET_BACKGROUND) failed");
-      return;
-  }
-}
-
-void print_ball_position() {
-  vga_ball_arg_t vla;
-
+  
   if (ioctl(vga_ball_fd, VGA_BALL_READ_POSITION, &vla)) {
       perror("ioctl(VGA_BALL_READ_POSITION) failed");
       return;
   }
-
-  printf("ball @ (%u, %u)\n", vla.position.x, vla.position.y);
+  printf("(%u, %u)\n", vla.x, vla.y);
 }
 
-void set_ball_position(unsigned short x, unsigned short y)
+/* Set the ball position */
+void set_ball_position(unsigned int x, unsigned int y)
 {
   vga_ball_arg_t vla;
-
-  vla.position.x = x;
-  vla.position.y = y;
+  vla.x = x;
+  vla.y = y;
   if (ioctl(vga_ball_fd, VGA_BALL_WRITE_POSITION, &vla)) {
       perror("ioctl(VGA_BALL_WRITE_POSITION) failed");
       return;
@@ -69,14 +42,14 @@ void set_ball_position(unsigned short x, unsigned short y)
 
 int main()
 {
-  int i;
-  int x = SCREEN_WIDTH / 2;
-  int y = SCREEN_HEIGHT / 2;
-  int dx = 5;
-  int dy = 4;
+  int i, dx = 3, dy = 2;
   static const char filename[] = "/dev/vga_ball";
-
-  static const vga_ball_color_t beige = { 0xf9, 0xe4, 0xb7 };
+  unsigned int x = 320, y = 240;
+  const unsigned int radius = 8;
+  const unsigned int max_x = 639 - radius;
+  const unsigned int max_y = 479 - radius;
+  const unsigned int min_x = radius;
+  const unsigned int min_y = radius;
 
   printf("VGA ball Userspace program started\n");
 
@@ -86,25 +59,20 @@ int main()
   }
 
   printf("initial state: ");
-  print_background_color();
   print_ball_position();
 
-  set_background_color(&beige);
+  for (i = 0 ; i < 600 ; i++) {
+    if (x <= min_x || x >= max_x)
+      dx = -dx;
+    if (y <= min_y || y >= max_y)
+      dy = -dy;
 
-  for (i = 0 ; i < 1000 ; i++) {
     x += dx;
     y += dy;
 
-    if (x <= BALL_RADIUS || x >= SCREEN_WIDTH - 1 - BALL_RADIUS) {
-      dx = -dx;
-      x += dx;
-    }
-    if (y <= BALL_RADIUS || y >= SCREEN_HEIGHT - 1 - BALL_RADIUS) {
-      dy = -dy;
-      y += dy;
-    }
-
-    set_ball_position((unsigned short) x, (unsigned short) y);
+    set_ball_position(x, y);
+    if ((i % 30) == 0)
+      print_ball_position();
     usleep(16000);
   }
   

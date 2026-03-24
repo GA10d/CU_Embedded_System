@@ -43,6 +43,7 @@ TARFILES = Makefile \
 	$(SYSTEM)_top.sv \
 	$(BOARD_INFO) \
 	$(SRF) \
+	vga_ball_hw.tcl \
 	ip/intr_capturer/intr_capturer.v \
 	ip/intr_capturer/intr_capturer_hw.tcl \
 	vga_ball.sv

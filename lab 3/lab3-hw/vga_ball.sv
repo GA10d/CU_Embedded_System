@@ -4,20 +4,19 @@
  * Stephen A. Edwards
  * Columbia University
  *
- * Updated register map for the bouncing-ball lab:
+ * Register map:
  *
- * Word Offset 31                                      0   Meaning
- *        0    | unused | Blue | Green | Red             Background color
- *        1    | unused                       | X[9:0]    Ball center x (0-639)
- *        2    | unused                       | Y[8:0]    Ball center y (0-479)
+ * Byte Offset  31 ... 0   Meaning
+ *        0    |    X    |  Horizontal center of the ball in pixels (0-639)
+ *        4    |    Y    |  Vertical center of the ball in pixels (0-479)
  */
 
-module vga_ball(input logic         clk,
-	        input logic 	    reset,
+module vga_ball(input logic        clk,
+	        input logic 	   reset,
 		input logic [31:0] writedata,
-		input logic 	    write,
-		input 		    chipselect,
-		input logic [2:0]  address,
+		input logic 	   write,
+		input logic 	   chipselect,
+		input logic [0:0]  address,
 
 		output logic [7:0] VGA_R, VGA_G, VGA_B,
 		output logic 	   VGA_CLK, VGA_HS, VGA_VS,
@@ -27,61 +26,56 @@ module vga_ball(input logic         clk,
    logic [10:0]	   hcount;
    logic [9:0]     vcount;
 
-   localparam int H_VISIBLE = 640;
-   localparam int V_VISIBLE = 480;
-   localparam int BALL_RADIUS = 16;
-   localparam int BALL_RADIUS_SQ = BALL_RADIUS * BALL_RADIUS;
+   localparam logic [9:0] DEFAULT_BALL_X = 10'd320;
+   localparam logic [9:0] DEFAULT_BALL_Y = 10'd240;
+   localparam logic [9:0] BALL_RADIUS = 10'd8;
 
-   logic [7:0] 	   background_r, background_g, background_b;
-   logic [9:0]     pending_x, ball_x;
-   logic [8:0]     pending_y, ball_y;
-   logic           ball_pixel;
-   int signed      dx, dy;
+   logic [9:0]      pending_ball_x, pending_ball_y;
+   logic [9:0]      ball_x, ball_y;
+   logic signed [11:0] dx, dy;
+   logic [23:0]     distance_sq;
+   logic [23:0]     radius_sq;
+   logic            draw_ball;
 	
    vga_counters counters(.clk50(clk), .*);
 
    always_ff @(posedge clk)
      if (reset) begin
-	background_r <= 8'hf9;
-	background_g <= 8'he4;
-	background_b <= 8'hb7;
-	pending_x <= H_VISIBLE / 2;
-	pending_y <= V_VISIBLE / 2;
-	ball_x <= H_VISIBLE / 2;
-	ball_y <= V_VISIBLE / 2;
-     end else if (chipselect && write)
-       case (address)
-	 3'h0 : begin
-	    background_r <= writedata[7:0];
-	    background_g <= writedata[15:8];
-	    background_b <= writedata[23:16];
-	 end
-	 3'h1 : if (writedata[9:0] < H_VISIBLE)
-	   pending_x <= writedata[9:0];
-	 else
-	   pending_x <= H_VISIBLE - 1;
-	 3'h2 : if (writedata[8:0] < V_VISIBLE)
-	   pending_y <= writedata[8:0];
-	 else
-	   pending_y <= V_VISIBLE - 1;
-       endcase
-     else if (hcount == 11'd0 && vcount == 10'd480) begin
-	ball_x <= pending_x;
-	ball_y <= pending_y;
+	pending_ball_x <= DEFAULT_BALL_X;
+	pending_ball_y <= DEFAULT_BALL_Y;
+	ball_x <= DEFAULT_BALL_X;
+	ball_y <= DEFAULT_BALL_Y;
+     end else begin
+       if (chipselect && write)
+	 case (address)
+	   1'b0 : pending_ball_x <= (writedata[9:0] > 10'd639) ?
+				   10'd639 : writedata[9:0];
+	   1'b1 : pending_ball_y <= (writedata[9:0] > 10'd479) ?
+				   10'd479 : writedata[9:0];
+	 endcase
+
+       // Latch a new ball position only at the start of vertical blanking
+       // to avoid tearing from mid-frame coordinate changes.
+       if (hcount == 11'd0 && vcount == 10'd480) begin
+	  ball_x <= pending_ball_x;
+	  ball_y <= pending_ball_y;
+       end
      end
 
-   always_comb begin
-      dx = $signed({1'b0, hcount[10:1]}) - $signed({1'b0, ball_x});
-      dy = $signed({1'b0, vcount}) - $signed({2'b0, ball_y});
-      ball_pixel = dx * dx + dy * dy <= BALL_RADIUS_SQ;
+   assign dx = $signed({1'b0, hcount[10:1]}) - $signed({1'b0, ball_x});
+   assign dy = $signed({1'b0, vcount}) - $signed({1'b0, ball_y});
+   assign distance_sq = dx * dx + dy * dy;
+   assign radius_sq = BALL_RADIUS * BALL_RADIUS;
+   assign draw_ball = distance_sq <= radius_sq;
 
+   always_comb begin
       {VGA_R, VGA_G, VGA_B} = {8'h0, 8'h0, 8'h0};
       if (VGA_BLANK_n )
-	if (ball_pixel)
+	if (draw_ball)
 	  {VGA_R, VGA_G, VGA_B} = {8'hff, 8'hff, 8'hff};
 	else
 	  {VGA_R, VGA_G, VGA_B} =
-             {background_r, background_g, background_b};
+             {8'h20, 8'h20, 8'h80};
    end
 	       
 endmodule
