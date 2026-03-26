@@ -54,8 +54,9 @@ struct vga_ball_dev {
 } dev;
 
 /*
- * Write segments of a single digit
- * Assumes digit is in range and the device information has been set up
+ * The hardware now keeps an internal double-buffered framebuffer, so the
+ * driver still only needs to update high-level state: background color and
+ * ball center coordinates.
  */
 static void write_background(vga_ball_color_t *background)
 {
@@ -81,7 +82,7 @@ static void write_position(vga_ball_position_t *position)
 
 /*
  * Handle ioctl() calls from userspace:
- * Read or write the segments on single digits.
+ * Read or write the background/position state.
  * Note extensive error checking of arguments
  */
 static long vga_ball_ioctl(struct file *f, unsigned int cmd, unsigned long arg)

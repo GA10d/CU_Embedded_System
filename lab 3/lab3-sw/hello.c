@@ -72,8 +72,8 @@ int main()
   int i;
   int x = SCREEN_WIDTH / 2;
   int y = SCREEN_HEIGHT / 2;
-  int dx = 5;
-  int dy = 4;
+  int dx = 4;
+  int dy = 3;
   static const char filename[] = "/dev/vga_ball";
 
   static const vga_ball_color_t beige = { 0xf9, 0xe4, 0xb7 };
@@ -105,7 +105,7 @@ int main()
     }
 
     set_ball_position((unsigned short) x, (unsigned short) y);
-    usleep(16000);
+    usleep(16667);
   }
   
   printf("VGA BALL Userspace program terminating\n");

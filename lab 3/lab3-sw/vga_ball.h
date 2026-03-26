@@ -19,7 +19,11 @@ typedef struct {
 
 #define VGA_BALL_MAGIC 'q'
 
-/* ioctls and their arguments */
+/*
+ * ioctls and their arguments
+ *
+ * Position updates target a framebuffer-backed ball renderer in hardware.
+ */
 #define VGA_BALL_WRITE_BACKGROUND _IOW(VGA_BALL_MAGIC, 1, vga_ball_arg_t)
 #define VGA_BALL_READ_BACKGROUND  _IOR(VGA_BALL_MAGIC, 2, vga_ball_arg_t)
 #define VGA_BALL_WRITE_POSITION   _IOW(VGA_BALL_MAGIC, 3, vga_ball_arg_t)
